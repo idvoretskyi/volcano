@@ -17,6 +17,7 @@ limitations under the License.
 package job
 
 import (
+	"context"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -24,6 +25,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/api/scheduling/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog"
 
@@ -36,7 +38,7 @@ import (
 	jobhelpers "volcano.sh/volcano/pkg/controllers/job/helpers"
 )
 
-func (cc *Controller) addCommand(obj interface{}) {
+func (cc *jobcontroller) addCommand(obj interface{}) {
 	cmd, ok := obj.(*bus.Command)
 	if !ok {
 		klog.Errorf("obj is not Command")
@@ -46,7 +48,7 @@ func (cc *Controller) addCommand(obj interface{}) {
 	cc.commandQueue.Add(cmd)
 }
 
-func (cc *Controller) addJob(obj interface{}) {
+func (cc *jobcontroller) addJob(obj interface{}) {
 	job, ok := obj.(*batch.Job)
 	if !ok {
 		klog.Errorf("obj is not Job")
@@ -70,7 +72,7 @@ func (cc *Controller) addJob(obj interface{}) {
 	queue.Add(req)
 }
 
-func (cc *Controller) updateJob(oldObj, newObj interface{}) {
+func (cc *jobcontroller) updateJob(oldObj, newObj interface{}) {
 	newJob, ok := newObj.(*batch.Job)
 	if !ok {
 		klog.Errorf("newObj is not Job")
@@ -111,7 +113,7 @@ func (cc *Controller) updateJob(oldObj, newObj interface{}) {
 	queue.Add(req)
 }
 
-func (cc *Controller) deleteJob(obj interface{}) {
+func (cc *jobcontroller) deleteJob(obj interface{}) {
 	job, ok := obj.(*batch.Job)
 	if !ok {
 		// If we reached here it means the Job was deleted but its final state is unrecorded.
@@ -133,7 +135,7 @@ func (cc *Controller) deleteJob(obj interface{}) {
 	}
 }
 
-func (cc *Controller) addPod(obj interface{}) {
+func (cc *jobcontroller) addPod(obj interface{}) {
 	pod, ok := obj.(*v1.Pod)
 	if !ok {
 		klog.Errorf("Failed to convert %v to v1.Pod", obj)
@@ -187,7 +189,7 @@ func (cc *Controller) addPod(obj interface{}) {
 	queue.Add(req)
 }
 
-func (cc *Controller) updatePod(oldObj, newObj interface{}) {
+func (cc *jobcontroller) updatePod(oldObj, newObj interface{}) {
 	oldPod, ok := oldObj.(*v1.Pod)
 	if !ok {
 		klog.Errorf("Failed to convert %v to v1.Pod", oldObj)
@@ -281,7 +283,7 @@ func (cc *Controller) updatePod(oldObj, newObj interface{}) {
 	queue.Add(req)
 }
 
-func (cc *Controller) deletePod(obj interface{}) {
+func (cc *jobcontroller) deletePod(obj interface{}) {
 	pod, ok := obj.(*v1.Pod)
 	if !ok {
 		// If we reached here it means the pod was deleted but its final state is unrecorded.
@@ -349,7 +351,7 @@ func (cc *Controller) deletePod(obj interface{}) {
 	queue.Add(req)
 }
 
-func (cc *Controller) recordJobEvent(namespace, name string, event batch.JobEvent, message string) {
+func (cc *jobcontroller) recordJobEvent(namespace, name string, event batch.JobEvent, message string) {
 	job, err := cc.cache.Get(jobcache.JobKeyByName(namespace, name))
 	if err != nil {
 		klog.Warningf("Failed to find job in cache when reporting job event <%s/%s>: %v",
@@ -360,12 +362,12 @@ func (cc *Controller) recordJobEvent(namespace, name string, event batch.JobEven
 
 }
 
-func (cc *Controller) handleCommands() {
+func (cc *jobcontroller) handleCommands() {
 	for cc.processNextCommand() {
 	}
 }
 
-func (cc *Controller) processNextCommand() bool {
+func (cc *jobcontroller) processNextCommand() bool {
 	obj, shutdown := cc.commandQueue.Get()
 	if shutdown {
 		return false
@@ -373,7 +375,7 @@ func (cc *Controller) processNextCommand() bool {
 	cmd := obj.(*bus.Command)
 	defer cc.commandQueue.Done(cmd)
 
-	if err := cc.vcClient.BusV1alpha1().Commands(cmd.Namespace).Delete(cmd.Name, nil); err != nil {
+	if err := cc.vcClient.BusV1alpha1().Commands(cmd.Namespace).Delete(context.TODO(), cmd.Name, metav1.DeleteOptions{}); err != nil {
 		if !apierrors.IsNotFound(err) {
 			klog.Errorf("Failed to delete Command <%s/%s>.", cmd.Namespace, cmd.Name)
 			cc.commandQueue.AddRateLimited(cmd)
@@ -398,7 +400,7 @@ func (cc *Controller) processNextCommand() bool {
 	return true
 }
 
-func (cc *Controller) updatePodGroup(oldObj, newObj interface{}) {
+func (cc *jobcontroller) updatePodGroup(oldObj, newObj interface{}) {
 	oldPG, ok := oldObj.(*scheduling.PodGroup)
 	if !ok {
 		klog.Errorf("Failed to convert %v to PodGroup", newObj)
@@ -434,7 +436,7 @@ func (cc *Controller) updatePodGroup(oldObj, newObj interface{}) {
 
 // TODO(k82cn): add handler for PodGroup unschedulable event.
 
-func (cc *Controller) addPriorityClass(obj interface{}) {
+func (cc *jobcontroller) addPriorityClass(obj interface{}) {
 	pc := convert2PriorityClass(obj)
 	if pc == nil {
 		return
@@ -446,7 +448,7 @@ func (cc *Controller) addPriorityClass(obj interface{}) {
 	cc.priorityClasses[pc.Name] = pc
 }
 
-func (cc *Controller) deletePriorityClass(obj interface{}) {
+func (cc *jobcontroller) deletePriorityClass(obj interface{}) {
 	pc := convert2PriorityClass(obj)
 	if pc == nil {
 		return

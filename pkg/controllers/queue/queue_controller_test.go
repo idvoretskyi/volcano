@@ -17,6 +17,7 @@ limitations under the License.
 package queue
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -26,13 +27,21 @@ import (
 
 	schedulingv1beta1 "volcano.sh/volcano/pkg/apis/scheduling/v1beta1"
 	vcclient "volcano.sh/volcano/pkg/client/clientset/versioned/fake"
+	"volcano.sh/volcano/pkg/controllers/framework"
 )
 
-func newFakeController() *Controller {
+func newFakeController() *queuecontroller {
 	KubeBatchClientSet := vcclient.NewSimpleClientset()
 	KubeClientSet := kubeclient.NewSimpleClientset()
 
-	controller := NewQueueController(KubeClientSet, KubeBatchClientSet)
+	controller := &queuecontroller{}
+	opt := framework.ControllerOption{
+		VolcanoClient: KubeBatchClientSet,
+		KubeClient:    KubeClientSet,
+	}
+
+	controller.Initialize(&opt)
+
 	return controller
 }
 
@@ -269,10 +278,10 @@ func TestSyncQueue(t *testing.T) {
 
 		c.pgInformer.Informer().GetIndexer().Add(testcase.podGroup)
 		c.queueInformer.Informer().GetIndexer().Add(testcase.queue)
-		c.vcClient.SchedulingV1beta1().Queues().Create(testcase.queue)
+		c.vcClient.SchedulingV1beta1().Queues().Create(context.TODO(), testcase.queue, metav1.CreateOptions{})
 
 		err := c.syncQueue(testcase.queue, nil)
-		item, _ := c.vcClient.SchedulingV1beta1().Queues().Get(testcase.queue.Name, metav1.GetOptions{})
+		item, _ := c.vcClient.SchedulingV1beta1().Queues().Get(context.TODO(), testcase.queue.Name, metav1.GetOptions{})
 		if err != nil && testcase.ExpectValue != item.Status.Pending {
 			t.Errorf("case %d (%s): expected: %v, got %v ", i, testcase.Name, testcase.ExpectValue, c.queue.Len())
 		}

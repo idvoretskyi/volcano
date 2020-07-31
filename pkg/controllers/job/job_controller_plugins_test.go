@@ -17,6 +17,7 @@ limitations under the License.
 package job
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -27,15 +28,25 @@ import (
 
 	batch "volcano.sh/volcano/pkg/apis/batch/v1alpha1"
 	volcanoclient "volcano.sh/volcano/pkg/client/clientset/versioned/fake"
+	"volcano.sh/volcano/pkg/controllers/framework"
 )
 
-func newFakeController() *Controller {
+func newFakeController() *jobcontroller {
 	volcanoClientSet := volcanoclient.NewSimpleClientset()
 	kubeClientSet := kubeclient.NewSimpleClientset()
 
 	sharedInformers := informers.NewSharedInformerFactory(kubeClientSet, 0)
 
-	controller := NewJobController(kubeClientSet, volcanoClientSet, sharedInformers, 3)
+	controller := &jobcontroller{}
+	opt := &framework.ControllerOption{
+		VolcanoClient:         volcanoClientSet,
+		KubeClient:            kubeClientSet,
+		SharedInformerFactory: sharedInformers,
+		WorkerNum:             3,
+	}
+
+	controller.Initialize(opt)
+
 	return controller
 }
 
@@ -194,19 +205,19 @@ func TestPluginOnJobAdd(t *testing.T) {
 			for _, plugin := range testcase.Plugins {
 
 				if plugin == "svc" {
-					_, err := fakeController.kubeClient.CoreV1().ConfigMaps(namespace).Get(fmt.Sprint(testcase.Job.Name, "-svc"), metav1.GetOptions{})
+					_, err := fakeController.kubeClient.CoreV1().ConfigMaps(namespace).Get(context.TODO(), fmt.Sprint(testcase.Job.Name, "-svc"), metav1.GetOptions{})
 					if err != nil {
 						t.Errorf("Case %d (%s): expected: ConfigMap to be created, but not created because of error %s", i, testcase.Name, err.Error())
 					}
 
-					_, err = fakeController.kubeClient.CoreV1().Services(namespace).Get(testcase.Job.Name, metav1.GetOptions{})
+					_, err = fakeController.kubeClient.CoreV1().Services(namespace).Get(context.TODO(), testcase.Job.Name, metav1.GetOptions{})
 					if err != nil {
 						t.Errorf("Case %d (%s): expected: Service to be created, but not created because of error %s", i, testcase.Name, err.Error())
 					}
 				}
 
 				if plugin == "ssh" {
-					_, err := fakeController.kubeClient.CoreV1().Secrets(namespace).Get(
+					_, err := fakeController.kubeClient.CoreV1().Secrets(namespace).Get(context.TODO(),
 						fmt.Sprintf("%s-%s", testcase.Job.Name, "ssh"), metav1.GetOptions{})
 					if err != nil {
 						t.Errorf("Case %d (%s): expected: Secret to be created, but not created because of error %s", i, testcase.Name, err.Error())
@@ -277,19 +288,19 @@ func TestPluginOnJobDelete(t *testing.T) {
 			for _, plugin := range testcase.Plugins {
 
 				if plugin == "svc" {
-					_, err := fakeController.kubeClient.CoreV1().ConfigMaps(namespace).Get(fmt.Sprint(testcase.Job.Name, "-svc"), metav1.GetOptions{})
+					_, err := fakeController.kubeClient.CoreV1().ConfigMaps(namespace).Get(context.TODO(), fmt.Sprint(testcase.Job.Name, "-svc"), metav1.GetOptions{})
 					if err == nil {
 						t.Errorf("Case %d (%s): expected: ConfigMap to be deleted, but not deleted.", i, testcase.Name)
 					}
 
-					_, err = fakeController.kubeClient.CoreV1().Services(namespace).Get(testcase.Job.Name, metav1.GetOptions{})
+					_, err = fakeController.kubeClient.CoreV1().Services(namespace).Get(context.TODO(), testcase.Job.Name, metav1.GetOptions{})
 					if err == nil {
 						t.Errorf("Case %d (%s): expected: Service to be deleted, but not deleted.", i, testcase.Name)
 					}
 				}
 
 				if plugin == "ssh" {
-					_, err := fakeController.kubeClient.CoreV1().Secrets(namespace).Get(
+					_, err := fakeController.kubeClient.CoreV1().Secrets(namespace).Get(context.TODO(),
 						fmt.Sprintf("%s-%s-%s", testcase.Job.Name, testcase.Job.UID, "ssh"), metav1.GetOptions{})
 					if err == nil {
 						t.Errorf("Case %d (%s): expected: secret to be deleted, but not deleted.", i, testcase.Name)

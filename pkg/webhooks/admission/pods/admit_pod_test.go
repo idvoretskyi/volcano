@@ -17,11 +17,12 @@ limitations under the License.
 package pods
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	"k8s.io/api/admission/v1beta1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	vcschedulingv1 "volcano.sh/volcano/pkg/apis/scheduling/v1beta1"
@@ -128,7 +129,7 @@ func TestValidatePod(t *testing.T) {
 			},
 
 			reviewResponse: v1beta1.AdmissionResponse{Allowed: false},
-			ret:            `failed to get PodGroup for pod <test/volcano-pod-2>: podgroups.scheduling "podgroup-p1" not found`,
+			ret:            `failed to get PodGroup for pod <test/volcano-pod-2>: podgroups.scheduling.volcano.sh "podgroup-p1" not found`,
 			ExpectErr:      true,
 			disabledPG:     true,
 		},
@@ -154,7 +155,7 @@ func TestValidatePod(t *testing.T) {
 		config.SchedulerName = "volcano"
 
 		if !testCase.disabledPG {
-			_, err := config.VolcanoClient.SchedulingV1beta1().PodGroups(namespace).Create(pg)
+			_, err := config.VolcanoClient.SchedulingV1beta1().PodGroups(namespace).Create(context.TODO(), pg, metav1.CreateOptions{})
 			if err != nil {
 				t.Error("PG Creation Failed")
 			}

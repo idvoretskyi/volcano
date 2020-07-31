@@ -17,6 +17,15 @@ RELEASE_DIR=_output/release
 REL_OSARCH=linux/amd64
 REPO_PATH=volcano.sh/volcano
 IMAGE_PREFIX=volcanosh/vc
+# Produce CRDs that work back to Kubernetes 1.11 (no version conversion)
+CRD_OPTIONS ?= "crd:trivialVersions=true"
+
+# Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
+ifeq (,$(shell go env GOBIN))
+GOBIN=$(shell go env GOPATH)/bin
+else
+GOBIN=$(shell go env GOBIN)
+endif
 
 include Makefile.def
 
@@ -41,7 +50,7 @@ vcctl: init
 	go build -ldflags ${LD_FLAGS} -o=${BIN_DIR}/vcctl ./cmd/cli
 
 image_bins: init
-	go get github.com/mitchellh/gox
+	GO111MODULE=off go get github.com/mitchellh/gox
 	CGO_ENABLED=0 gox -osarch=${REL_OSARCH} -ldflags ${LD_FLAGS} -output ${BIN_DIR}/${REL_OSARCH}/vcctl ./cmd/cli
 	for name in controller-manager scheduler webhook-manager; do\
 		CGO_ENABLED=0 gox -osarch=${REL_OSARCH} -ldflags ${LD_FLAGS} -output ${BIN_DIR}/${REL_OSARCH}/vc-$$name ./cmd/$$name; \
@@ -60,12 +69,22 @@ webhook-manager-base-image:
 generate-code:
 	./hack/update-gencode.sh
 
+# Generate manifests e.g. CRD, RBAC etc.
+manifests: controller-gen
+	$(CONTROLLER_GEN) $(CRD_OPTIONS) paths="./pkg/apis/scheduling/v1beta1;./pkg/apis/batch/v1alpha1;./pkg/apis/bus/v1alpha1;" output:crd:artifacts:config=config/crd/bases
+
 unit-test:
 	go clean -testcache
 	go list ./... | grep -v e2e | xargs go test -v -race
 
-e2e-test-kind:
+e2e:
 	./hack/run-e2e-kind.sh
+
+e2e-test-scheduling:
+	E2E_TYPE=SCHEDULING ./hack/run-e2e-kind.sh
+
+e2e-test-job:
+	E2E_TYPE=JOB ./hack/run-e2e-kind.sh
 
 generate-yaml: init
 	./hack/generate-yaml.sh TAG=${RELEASE_VER}
@@ -88,6 +107,7 @@ verify:
 	hack/verify-golint.sh
 	hack/verify-gencode.sh
 	hack/verify-vendor.sh
+	hack/verify-vendor-licenses.sh
 
 lint: ## Lint the files
 	golangci-lint version
@@ -103,3 +123,20 @@ command-lines:
 	go build -ldflags ${LD_FLAGS} -o=${BIN_DIR}/vjobs ./cmd/cli/vjobs
 	go build -ldflags ${LD_FLAGS} -o=${BIN_DIR}/vqueues ./cmd/cli/vqueues
 	go build -ldflags ${LD_FLAGS} -o=${BIN_DIR}/vsub ./cmd/cli/vsub
+
+# find or download controller-gen
+# download controller-gen if necessary
+controller-gen:
+ifeq (, $(shell which controller-gen))
+	@{ \
+	set -e ;\
+	CONTROLLER_GEN_TMP_DIR=$$(mktemp -d) ;\
+	cd $$CONTROLLER_GEN_TMP_DIR ;\
+	go mod init tmp ;\
+	go get sigs.k8s.io/controller-tools/cmd/controller-gen@v0.2.5 ;\
+	rm -rf $$CONTROLLER_GEN_TMP_DIR ;\
+	}
+CONTROLLER_GEN=$(GOBIN)/controller-gen
+else
+CONTROLLER_GEN=$(shell which controller-gen)
+endif

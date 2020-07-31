@@ -17,6 +17,7 @@ limitations under the License.
 package cache
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -40,12 +41,12 @@ import (
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
-	"k8s.io/kubernetes/pkg/scheduler/volumebinder"
-	vcv1beta1 "volcano.sh/volcano/pkg/apis/scheduling/v1beta1"
+	volumescheduling "k8s.io/kubernetes/pkg/controller/volume/scheduling"
 
 	"volcano.sh/volcano/cmd/scheduler/app/options"
 	"volcano.sh/volcano/pkg/apis/scheduling"
 	schedulingscheme "volcano.sh/volcano/pkg/apis/scheduling/scheme"
+	vcv1beta1 "volcano.sh/volcano/pkg/apis/scheduling/v1beta1"
 	vcclient "volcano.sh/volcano/pkg/client/clientset/versioned"
 	"volcano.sh/volcano/pkg/client/clientset/versioned/scheme"
 	vcinformer "volcano.sh/volcano/pkg/client/informers/externalversions"
@@ -66,15 +67,15 @@ func New(config *rest.Config, schedulerName string, defaultQueue string) Cache {
 	return newSchedulerCache(config, schedulerName, defaultQueue)
 }
 
-//SchedulerCache cache for the kube batch
+// SchedulerCache cache for the kube batch
 type SchedulerCache struct {
 	sync.Mutex
 
-	kubeclient *kubernetes.Clientset
-	vcclient   *vcclient.Clientset
+	kubeClient *kubernetes.Clientset
+	vcClient   *vcclient.Clientset
 
 	defaultQueue string
-	// schedulerName is the name for kube batch scheduler
+	// schedulerName is the name for volcano scheduler
 	schedulerName string
 
 	podInformer             infov1.PodInformer
@@ -113,13 +114,15 @@ type defaultBinder struct {
 
 //Bind will send bind request to api server
 func (db *defaultBinder) Bind(p *v1.Pod, hostname string) error {
-	if err := db.kubeclient.CoreV1().Pods(p.Namespace).Bind(&v1.Binding{
-		ObjectMeta: metav1.ObjectMeta{Namespace: p.Namespace, Name: p.Name, UID: p.UID, Annotations: p.Annotations},
-		Target: v1.ObjectReference{
-			Kind: "Node",
-			Name: hostname,
+	if err := db.kubeclient.CoreV1().Pods(p.Namespace).Bind(context.TODO(),
+		&v1.Binding{
+			ObjectMeta: metav1.ObjectMeta{Namespace: p.Namespace, Name: p.Name, UID: p.UID, Annotations: p.Annotations},
+			Target: v1.ObjectReference{
+				Kind: "Node",
+				Name: hostname,
+			},
 		},
-	}); err != nil {
+		metav1.CreateOptions{}); err != nil {
 		klog.Errorf("Failed to bind pod <%v/%v>: %#v", p.Namespace, p.Name, err)
 		return err
 	}
@@ -128,16 +131,39 @@ func (db *defaultBinder) Bind(p *v1.Pod, hostname string) error {
 
 type defaultEvictor struct {
 	kubeclient *kubernetes.Clientset
+	recorder   record.EventRecorder
 }
 
 //Evict will send delete pod request to api server
-func (de *defaultEvictor) Evict(p *v1.Pod) error {
-	klog.V(3).Infof("Evicting pod %v/%v", p.Namespace, p.Name)
+func (de *defaultEvictor) Evict(p *v1.Pod, reason string) error {
+	klog.V(3).Infof("Evicting pod %v/%v, because of %v", p.Namespace, p.Name, reason)
 
-	if err := de.kubeclient.CoreV1().Pods(p.Namespace).Delete(p.Name, nil); err != nil {
+	evictMsg := fmt.Sprintf("Pod is evicted, because of %v", reason)
+	annotations := map[string]string{}
+	// record that we are evicting the pod
+	de.recorder.AnnotatedEventf(p, annotations, v1.EventTypeWarning, "Evict", evictMsg)
+
+	pod := p.DeepCopy()
+	condition := &v1.PodCondition{
+		Type:    v1.PodReady,
+		Status:  v1.ConditionFalse,
+		Reason:  "Evict",
+		Message: evictMsg,
+	}
+	if podutil.UpdatePodCondition(&pod.Status, condition) == false {
+		klog.V(1).Infof("UpdatePodCondition: existed condition, not update")
+		klog.V(1).Infof("%+v", pod.Status.Conditions)
+		return nil
+	}
+	if _, err := de.kubeclient.CoreV1().Pods(p.Namespace).UpdateStatus(context.TODO(), pod, metav1.UpdateOptions{}); err != nil {
+		klog.Errorf("Failed to update pod <%v/%v> status: %v", pod.Namespace, pod.Name, err)
+		return err
+	}
+	if err := de.kubeclient.CoreV1().Pods(p.Namespace).Delete(context.TODO(), p.Name, metav1.DeleteOptions{}); err != nil {
 		klog.Errorf("Failed to evict pod <%v/%v>: %#v", p.Namespace, p.Name, err)
 		return err
 	}
+
 	return nil
 }
 
@@ -176,7 +202,7 @@ func podConditionHaveUpdate(status *v1.PodStatus, condition *v1.PodCondition) bo
 func (su *defaultStatusUpdater) UpdatePodCondition(pod *v1.Pod, condition *v1.PodCondition) (*v1.Pod, error) {
 	klog.V(3).Infof("Updating pod condition for %s/%s to (%s==%s)", pod.Namespace, pod.Name, condition.Type, condition.Status)
 	if podutil.UpdatePodCondition(&pod.Status, condition) {
-		return su.kubeclient.CoreV1().Pods(pod.Namespace).UpdateStatus(pod)
+		return su.kubeclient.CoreV1().Pods(pod.Namespace).UpdateStatus(context.TODO(), pod, metav1.UpdateOptions{})
 	}
 	return pod, nil
 }
@@ -189,7 +215,7 @@ func (su *defaultStatusUpdater) UpdatePodGroup(pg *schedulingapi.PodGroup) (*sch
 		return nil, err
 	}
 
-	updated, err := su.vcclient.SchedulingV1beta1().PodGroups(podgroup.Namespace).Update(podgroup)
+	updated, err := su.vcclient.SchedulingV1beta1().PodGroups(podgroup.Namespace).Update(context.TODO(), podgroup, metav1.UpdateOptions{})
 	if err != nil {
 		klog.Errorf("Error while updating PodGroup with error: %v", err)
 		return nil, err
@@ -205,12 +231,12 @@ func (su *defaultStatusUpdater) UpdatePodGroup(pg *schedulingapi.PodGroup) (*sch
 }
 
 type defaultVolumeBinder struct {
-	volumeBinder *volumebinder.VolumeBinder
+	volumeBinder volumescheduling.SchedulerVolumeBinder
 }
 
 // AllocateVolumes allocates volume on the host to the task
 func (dvb *defaultVolumeBinder) AllocateVolumes(task *schedulingapi.TaskInfo, hostname string) error {
-	allBound, err := dvb.volumeBinder.Binder.AssumePodVolumes(task.Pod, hostname)
+	allBound, err := dvb.volumeBinder.AssumePodVolumes(task.Pod, hostname)
 	task.VolumeReady = allBound
 
 	return err
@@ -223,7 +249,7 @@ func (dvb *defaultVolumeBinder) BindVolumes(task *schedulingapi.TaskInfo) error 
 		return nil
 	}
 
-	return dvb.volumeBinder.Binder.BindPodVolumes(task.Pod)
+	return dvb.volumeBinder.BindPodVolumes(task.Pod)
 }
 
 func newSchedulerCache(config *rest.Config, schedulerName string, defaultQueue string) *SchedulerCache {
@@ -241,15 +267,17 @@ func newSchedulerCache(config *rest.Config, schedulerName string, defaultQueue s
 	}
 
 	// create default queue
+	reclaimable := true
 	defaultQue := vcv1beta1.Queue{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: defaultQueue,
 		},
 		Spec: vcv1beta1.QueueSpec{
-			Weight: 1,
+			Reclaimable: &reclaimable,
+			Weight:      1,
 		},
 	}
-	if _, err := vcClient.SchedulingV1beta1().Queues().Create(&defaultQue); err != nil && !apierrors.IsAlreadyExists(err) {
+	if _, err := vcClient.SchedulingV1beta1().Queues().Create(context.TODO(), &defaultQue, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
 		panic(fmt.Sprintf("failed init default queue, with err: %v", err))
 	}
 
@@ -260,8 +288,8 @@ func newSchedulerCache(config *rest.Config, schedulerName string, defaultQueue s
 		PriorityClasses: make(map[string]*v1beta1.PriorityClass),
 		errTasks:        workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
 		deletedJobs:     workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()),
-		kubeclient:      kubeClient,
-		vcclient:        vcClient,
+		kubeClient:      kubeClient,
+		vcClient:        vcClient,
 		defaultQueue:    defaultQueue,
 		schedulerName:   schedulerName,
 
@@ -274,27 +302,29 @@ func newSchedulerCache(config *rest.Config, schedulerName string, defaultQueue s
 	sc.Recorder = broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: schedulerName})
 
 	sc.Binder = &defaultBinder{
-		kubeclient: sc.kubeclient,
+		kubeclient: sc.kubeClient,
 	}
 
 	sc.Evictor = &defaultEvictor{
-		kubeclient: sc.kubeclient,
+		kubeclient: sc.kubeClient,
+		recorder:   sc.Recorder,
 	}
 
 	sc.StatusUpdater = &defaultStatusUpdater{
-		kubeclient: sc.kubeclient,
-		vcclient:   sc.vcclient,
+		kubeclient: sc.kubeClient,
+		vcclient:   sc.vcClient,
 	}
 
-	informerFactory := informers.NewSharedInformerFactory(sc.kubeclient, 0)
+	informerFactory := informers.NewSharedInformerFactory(sc.kubeClient, 0)
 
 	sc.pvcInformer = informerFactory.Core().V1().PersistentVolumeClaims()
 	sc.pvInformer = informerFactory.Core().V1().PersistentVolumes()
 	sc.scInformer = informerFactory.Storage().V1().StorageClasses()
 	sc.VolumeBinder = &defaultVolumeBinder{
-		volumeBinder: volumebinder.NewVolumeBinder(
-			sc.kubeclient,
+		volumeBinder: volumescheduling.NewVolumeBinder(
+			sc.kubeClient,
 			sc.nodeInformer,
+			nil,
 			sc.pvcInformer,
 			sc.pvInformer,
 			sc.scInformer,
@@ -351,7 +381,7 @@ func newSchedulerCache(config *rest.Config, schedulerName string, defaultQueue s
 		DeleteFunc: sc.DeleteResourceQuota,
 	})
 
-	vcinformers := vcinformer.NewSharedInformerFactory(sc.vcclient, 0)
+	vcinformers := vcinformer.NewSharedInformerFactory(sc.vcClient, 0)
 
 	// create informer for PodGroup(v1beta1) information
 	sc.podGroupInformerV1beta1 = vcinformers.Scheduling().V1beta1().PodGroups()
@@ -473,7 +503,7 @@ func (sc *SchedulerCache) Evict(taskInfo *schedulingapi.TaskInfo, reason string)
 	p := task.Pod
 
 	go func() {
-		err := sc.Evictor.Evict(p)
+		err := sc.Evictor.Evict(p, reason)
 		if err != nil {
 			sc.resyncTask(task)
 		}
@@ -524,30 +554,11 @@ func (sc *SchedulerCache) Bind(taskInfo *schedulingapi.TaskInfo, hostname string
 	}
 
 	p := task.Pod
-
-	var pgCopy schedulingapi.PodGroup
-	if job.PodGroup != nil {
-		pgCopy = schedulingapi.PodGroup{
-			Version:  job.PodGroup.Version,
-			PodGroup: *job.PodGroup.PodGroup.DeepCopy(),
-		}
-	}
-
 	go func() {
 		if err := sc.Binder.Bind(p, hostname); err != nil {
 			sc.resyncTask(task)
 		} else {
 			sc.Recorder.Eventf(p, v1.EventTypeNormal, "Scheduled", "Successfully assigned %v/%v to %v", p.Namespace, p.Name, hostname)
-
-			if job.PodGroup != nil {
-				msg := fmt.Sprintf("%v/%v tasks in gang unschedulable: %v, %v minAvailable, %v Pending",
-					len(job.TaskStatusIndex[schedulingapi.Pending]),
-					len(job.Tasks),
-					scheduling.PodGroupReady,
-					job.MinAvailable,
-					len(job.TaskStatusIndex[schedulingapi.Pending]))
-				sc.recordPodGroupEvent(&pgCopy, v1.EventTypeNormal, string(scheduling.PodGroupScheduled), msg)
-			}
 		}
 	}()
 
@@ -562,6 +573,11 @@ func (sc *SchedulerCache) AllocateVolumes(task *schedulingapi.TaskInfo, hostname
 // BindVolumes binds volumes to the task
 func (sc *SchedulerCache) BindVolumes(task *schedulingapi.TaskInfo) error {
 	return sc.VolumeBinder.BindVolumes(task)
+}
+
+// Client returns the kubernetes clientSet
+func (sc *SchedulerCache) Client() kubernetes.Interface {
+	return sc.kubeClient
 }
 
 // taskUnschedulable updates pod status of pending task
@@ -771,11 +787,6 @@ func (sc *SchedulerCache) String() string {
 
 // RecordJobStatusEvent records related events according to job status.
 func (sc *SchedulerCache) RecordJobStatusEvent(job *schedulingapi.JobInfo) {
-	baseErrorMessage := job.JobFitErrors
-	if baseErrorMessage == "" {
-		baseErrorMessage = schedulingapi.AllNodeUnavailableMsg
-	}
-
 	pgUnschedulable := job.PodGroup != nil &&
 		(job.PodGroup.Status.Phase == scheduling.PodGroupUnknown ||
 			job.PodGroup.Status.Phase == scheduling.PodGroupPending ||
@@ -788,8 +799,14 @@ func (sc *SchedulerCache) RecordJobStatusEvent(job *schedulingapi.JobInfo) {
 			len(job.Tasks),
 			job.FitError())
 		sc.recordPodGroupEvent(job.PodGroup, v1.EventTypeWarning, string(scheduling.PodGroupUnschedulableType), msg)
+	} else {
+		sc.recordPodGroupEvent(job.PodGroup, v1.EventTypeNormal, string(scheduling.PodGroupScheduled), string(scheduling.PodGroupReady))
 	}
 
+	baseErrorMessage := job.JobFitErrors
+	if baseErrorMessage == "" {
+		baseErrorMessage = schedulingapi.AllNodeUnavailableMsg
+	}
 	// Update podCondition for tasks Allocated and Pending before job discarded
 	for _, status := range []schedulingapi.TaskStatus{schedulingapi.Allocated, schedulingapi.Pending, schedulingapi.Pipelined} {
 		for _, taskInfo := range job.TaskStatusIndex[status] {

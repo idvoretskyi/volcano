@@ -170,7 +170,7 @@ func (alloc *Action) Execute(ssn *framework.Session) {
 		klog.V(3).Infof("Try to allocate resource to %d tasks of Job <%v/%v>",
 			tasks.Len(), job.Namespace, job.Name)
 
-		stmt := ssn.Statement()
+		stmt := framework.NewStatement(ssn)
 
 		for !tasks.Empty() {
 			task := tasks.Pop().(*api.TaskInfo)
@@ -197,6 +197,11 @@ func (alloc *Action) Execute(ssn *framework.Session) {
 				if task.InitResreq.LessEqual(n.Idle) || task.InitResreq.LessEqual(n.FutureIdle()) {
 					candidateNodes = append(candidateNodes, n)
 				}
+			}
+
+			// If not candidate nodes for this task, skip it.
+			if len(candidateNodes) == 0 {
+				continue
 			}
 
 			nodeScores := util.PrioritizeNodes(task, candidateNodes, ssn.BatchNodeOrderFn, ssn.NodeOrderMapFn, ssn.NodeOrderReduceFn)
@@ -242,6 +247,7 @@ func (alloc *Action) Execute(ssn *framework.Session) {
 			stmt.Commit()
 		} else {
 			stmt.Discard()
+			break
 		}
 
 		// Added Namespace back until no job in Namespace.

@@ -17,6 +17,7 @@ limitations under the License.
 package job
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -37,7 +38,7 @@ func newRateLimitingQueue() workqueue.RateLimitingInterface {
 	))
 }
 
-func (cc *Controller) processResyncTask() {
+func (cc *jobcontroller) processResyncTask() {
 	obj, shutdown := cc.errTasks.Get()
 	if shutdown {
 		return
@@ -63,11 +64,11 @@ func (cc *Controller) processResyncTask() {
 	}
 }
 
-func (cc *Controller) syncTask(oldTask *v1.Pod) error {
+func (cc *jobcontroller) syncTask(oldTask *v1.Pod) error {
 	cc.Mutex.Lock()
 	defer cc.Mutex.Unlock()
 
-	newPod, err := cc.kubeClient.CoreV1().Pods(oldTask.Namespace).Get(oldTask.Name, metav1.GetOptions{})
+	newPod, err := cc.kubeClient.CoreV1().Pods(oldTask.Namespace).Get(context.TODO(), oldTask.Name, metav1.GetOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
 			if err := cc.cache.DeletePod(oldTask); err != nil {
@@ -84,6 +85,6 @@ func (cc *Controller) syncTask(oldTask *v1.Pod) error {
 	return cc.cache.UpdatePod(newPod)
 }
 
-func (cc *Controller) resyncTask(task *v1.Pod) {
+func (cc *jobcontroller) resyncTask(task *v1.Pod) {
 	cc.errTasks.AddRateLimited(task)
 }

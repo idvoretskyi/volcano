@@ -73,21 +73,17 @@ func (gp *gangPlugin) OnSessionOpen(ssn *framework.Session) {
 
 	preemptableFn := func(preemptor *api.TaskInfo, preemptees []*api.TaskInfo) []*api.TaskInfo {
 		var victims []*api.TaskInfo
-		jobOccupidMap := map[api.JobID]int32{}
+		var pJob *api.JobInfo = ssn.Jobs[preemptor.Job]
 
 		for _, preemptee := range preemptees {
 			job := ssn.Jobs[preemptee.Job]
-			if _, found := jobOccupidMap[job.UID]; !found {
-				jobOccupidMap[job.UID] = job.ReadyTaskNum()
-			}
-			occupid := jobOccupidMap[job.UID]
-			preemptable := job.MinAvailable <= occupid-1 || job.MinAvailable == 1
+
+			preemptable := pJob.Priority > job.Priority
 
 			if !preemptable {
 				klog.V(4).Infof("Can not preempt task <%v/%v> because of gang-scheduling",
 					preemptee.Namespace, preemptee.Name)
 			} else {
-				jobOccupidMap[job.UID] = occupid - 1
 				victims = append(victims, preemptee)
 			}
 		}
@@ -121,6 +117,17 @@ func (gp *gangPlugin) OnSessionOpen(ssn *framework.Session) {
 
 		if rReady {
 			return -1
+		}
+
+		if !lReady && !rReady {
+			if lv.CreationTimestamp.Equal(&rv.CreationTimestamp) {
+				if lv.UID < rv.UID {
+					return -1
+				}
+			} else if lv.CreationTimestamp.Before(&rv.CreationTimestamp) {
+				return -1
+			}
+			return 1
 		}
 
 		return 0
@@ -160,7 +167,7 @@ func (gp *gangPlugin) OnSessionClose(ssn *framework.Session) {
 				Message:            msg,
 			}
 
-			if err := ssn.UpdateJobCondition(job, jc); err != nil {
+			if err := ssn.UpdatePodGroupCondition(job, jc); err != nil {
 				klog.Errorf("Failed to update job <%s/%s> condition: %v",
 					job.Namespace, job.Name, err)
 			}
@@ -176,6 +183,21 @@ func (gp *gangPlugin) OnSessionClose(ssn *framework.Session) {
 				job.NodesFitErrors[taskInfo.UID] = fitError
 				fitError.SetError(msg)
 			}
+		} else {
+			jc := &scheduling.PodGroupCondition{
+				Type:               scheduling.PodGroupScheduled,
+				Status:             v1.ConditionTrue,
+				LastTransitionTime: metav1.Now(),
+				TransitionID:       string(ssn.UID),
+				Reason:             "tasks in gang are ready to be scheduled",
+				Message:            "",
+			}
+
+			if err := ssn.UpdatePodGroupCondition(job, jc); err != nil {
+				klog.Errorf("Failed to update job <%s/%s> condition: %v",
+					job.Namespace, job.Name, err)
+			}
+
 		}
 	}
 

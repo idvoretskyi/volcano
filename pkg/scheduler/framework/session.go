@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
 
 	"volcano.sh/volcano/pkg/apis/scheduling"
@@ -36,16 +37,18 @@ import (
 type Session struct {
 	UID types.UID
 
-	cache cache.Cache
+	kubeClient kubernetes.Interface
+	cache      cache.Cache
 
-	podGroupStatus map[api.JobID]*scheduling.PodGroupStatus
+	// podGroupStatus cache podgroup status during schedule
+	// This should not be mutated after initiated
+	podGroupStatus map[api.JobID]scheduling.PodGroupStatus
 
 	Jobs          map[api.JobID]*api.JobInfo
 	Nodes         map[string]*api.NodeInfo
 	Queues        map[api.QueueID]*api.QueueInfo
 	NamespaceInfo map[api.NamespaceName]*api.NamespaceInfo
 
-	Backlog        []*api.JobInfo
 	Tiers          []conf.Tier
 	Configurations []conf.Configuration
 
@@ -72,10 +75,11 @@ type Session struct {
 
 func openSession(cache cache.Cache) *Session {
 	ssn := &Session{
-		UID:   uuid.NewUUID(),
-		cache: cache,
+		UID:        uuid.NewUUID(),
+		kubeClient: cache.Client(),
+		cache:      cache,
 
-		podGroupStatus: map[api.JobID]*scheduling.PodGroupStatus{},
+		podGroupStatus: map[api.JobID]scheduling.PodGroupStatus{},
 
 		Jobs:   map[api.JobID]*api.JobInfo{},
 		Nodes:  map[string]*api.NodeInfo{},
@@ -107,7 +111,7 @@ func openSession(cache cache.Cache) *Session {
 	for _, job := range ssn.Jobs {
 		// only conditions will be updated periodically
 		if job.PodGroup != nil && job.PodGroup.Status.Conditions != nil {
-			ssn.podGroupStatus[job.UID] = &job.PodGroup.Status
+			ssn.podGroupStatus[job.UID] = job.PodGroup.Status
 		}
 
 		if vjr := ssn.JobValid(job); vjr != nil {
@@ -121,7 +125,7 @@ func openSession(cache cache.Cache) *Session {
 					Message:            vjr.Message,
 				}
 
-				if err := ssn.UpdateJobCondition(job, jc); err != nil {
+				if err := ssn.UpdatePodGroupCondition(job, jc); err != nil {
 					klog.Errorf("Failed to update job condition: %v", err)
 				}
 			}
@@ -146,7 +150,6 @@ func closeSession(ssn *Session) {
 
 	ssn.Jobs = nil
 	ssn.Nodes = nil
-	ssn.Backlog = nil
 	ssn.plugins = nil
 	ssn.eventHandlers = nil
 	ssn.jobOrderFns = nil
@@ -370,8 +373,8 @@ func (ssn *Session) Evict(reclaimee *api.TaskInfo, reason string) error {
 	return nil
 }
 
-// UpdateJobCondition update job condition accordingly.
-func (ssn *Session) UpdateJobCondition(jobInfo *api.JobInfo, cond *scheduling.PodGroupCondition) error {
+// UpdatePodGroupCondition update job condition accordingly.
+func (ssn *Session) UpdatePodGroupCondition(jobInfo *api.JobInfo, cond *scheduling.PodGroupCondition) error {
 	job, ok := ssn.Jobs[jobInfo.UID]
 	if !ok {
 		return fmt.Errorf("failed to find job <%s/%s>", jobInfo.Namespace, jobInfo.Name)
@@ -398,6 +401,11 @@ func (ssn *Session) UpdateJobCondition(jobInfo *api.JobInfo, cond *scheduling.Po
 // AddEventHandler add event handlers
 func (ssn *Session) AddEventHandler(eh *EventHandler) {
 	ssn.eventHandlers = append(ssn.eventHandlers, eh)
+}
+
+// KubeClient returns the kubernetes client
+func (ssn Session) KubeClient() kubernetes.Interface {
+	return ssn.kubeClient
 }
 
 //String return nodes and jobs information in the session

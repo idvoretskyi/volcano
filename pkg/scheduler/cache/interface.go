@@ -18,6 +18,7 @@ package cache
 
 import (
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/kubernetes"
 
 	"volcano.sh/volcano/pkg/scheduler/api"
 )
@@ -53,6 +54,9 @@ type Cache interface {
 
 	// BindVolumes binds volumes to the task
 	BindVolumes(task *api.TaskInfo) error
+
+	// Client returns the kubernetes clientSet, which can be used by plugins
+	Client() kubernetes.Interface
 }
 
 // VolumeBinder interface for allocate and bind volumes
@@ -68,7 +72,7 @@ type Binder interface {
 
 // Evictor interface for evict pods
 type Evictor interface {
-	Evict(pod *v1.Pod) error
+	Evict(pod *v1.Pod, reason string) error
 }
 
 // StatusUpdater updates pod with given PodCondition

@@ -17,6 +17,7 @@ limitations under the License.
 package validate
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -304,7 +305,7 @@ func TestValidateJobCreate(t *testing.T) {
 					Namespace: namespace,
 				},
 				Spec: v1alpha1.JobSpec{
-					MinAvailable: 0,
+					MinAvailable: -1,
 					Queue:        "default",
 					Tasks: []v1alpha1.TaskSpec{
 						{
@@ -328,7 +329,7 @@ func TestValidateJobCreate(t *testing.T) {
 				},
 			},
 			reviewResponse: v1beta1.AdmissionResponse{Allowed: false},
-			ret:            "'minAvailable' must be > 0",
+			ret:            "'minAvailable' must be >= 0",
 			ExpectErr:      true,
 		},
 		// maxretry less than zero
@@ -1053,7 +1054,7 @@ func TestValidateJobCreate(t *testing.T) {
 			config.VolcanoClient = fakeclient.NewSimpleClientset()
 
 			//create default queue
-			_, err := config.VolcanoClient.SchedulingV1beta1().Queues().Create(&defaultqueue)
+			_, err := config.VolcanoClient.SchedulingV1beta1().Queues().Create(context.TODO(), &defaultqueue, metav1.CreateOptions{})
 			if err != nil {
 				t.Error("Queue Creation Failed")
 			}
@@ -1120,7 +1121,7 @@ func TestValidateJobUpdate(t *testing.T) {
 		{
 			name:           "invalid minAvailable",
 			replicas:       4,
-			minAvailable:   0,
+			minAvailable:   -1,
 			addTask:        false,
 			mutateTaskName: false,
 			mutateSpec:     false,
